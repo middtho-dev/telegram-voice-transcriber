@@ -66,8 +66,8 @@ python -m src.main
 На сервере должны быть установлены `git`, Docker и Docker Compose.
 
 ```bash
-git clone https://github.com/<your-user>/<repo>.git
-cd <repo>
+git clone https://github.com/middtho-dev/telegram-voice-transcriber.git
+cd telegram-voice-transcriber
 cp .env.example .env
 nano .env
 ```
@@ -107,4 +107,3 @@ bash scripts/update-server.sh
 ## Безопасность
 
 Не коммитьте `.env` и файл `data/telegram_user.session`: сессия дает доступ к вашему Telegram-аккаунту. Они уже добавлены в `.gitignore`.
-
