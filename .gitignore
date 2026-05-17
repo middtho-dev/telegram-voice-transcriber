@@ -5,9 +5,8 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-data/
 downloads/
+models/
 *.session
 *.session-journal
 *.log
-

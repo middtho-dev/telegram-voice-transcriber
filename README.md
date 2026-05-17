@@ -1,69 +1,134 @@
-# Telegram Voice Transcriber
+# Telegram Business Voice Transcriber
 
-Userbot для Telegram: подключается к вашему личному аккаунту, мониторит входящие и исходящие голосовые сообщения во всех чатах, расшифровывает их через OpenAI и отправляет текст обратно в тот же чат.
+Бот для Telegram Business: принимает голосовые сообщения из личных чатов, расшифровывает их локально через `faster-whisper` и отправляет текст обратно в тот же чат от имени подключенного бизнес-аккаунта.
 
-Важно: это именно userbot через Telegram MTProto, а не обычный BotFather-бот. Он работает от имени вашего аккаунта.
+Нейросеть работает локально на вашей машине или VPS. Платные API для распознавания речи не используются.
 
-## Что умеет
+## Как это работает
 
-- Следит за голосовыми сообщениями во всех доступных чатах аккаунта.
-- Обрабатывает и входящие, и ваши исходящие голосовые.
-- Скачивает голосовое временно, отправляет в OpenAI Speech-to-Text и удаляет файл.
-- Пишет расшифровку в тот же чат, по умолчанию ответом на голосовое.
-- Готов к запуску на сервере через Docker Compose.
+1. Вы создаете обычного Telegram-бота через `@BotFather`.
+2. Подключаете этого бота в настройках Telegram Business вашего аккаунта.
+3. Telegram присылает боту события `business_message` из личных чатов.
+4. Если сообщение голосовое, приложение скачивает `.ogg` через Bot API.
+5. Локальная модель Whisper распознает аудио.
+6. Бот отправляет расшифровку обратно в чат через Business-соединение.
 
-## Подготовка
+Такой вариант не логинится в ваш Telegram-аккаунт через код и не хранит файл сессии аккаунта на сервере. На VPS хранится только токен бота.
 
-1. Получите `TELEGRAM_API_ID` и `TELEGRAM_API_HASH` на [my.telegram.org/apps](https://my.telegram.org/apps).
-2. Получите `OPENAI_API_KEY` в кабинете OpenAI.
-3. Создайте файл `.env`:
+## Что понадобится
+
+- Аккаунт Telegram Premium, потому что Telegram Business сейчас доступен Premium-пользователям.
+- Бот, созданный через `@BotFather`.
+- VPS или локальная машина, где будет работать распознавание.
+- Для Docker-запуска: Docker и Docker Compose.
+
+## Настройка Telegram
+
+### 1. Создайте бота
+
+1. Откройте в Telegram `@BotFather`.
+2. Отправьте команду `/newbot`.
+3. Задайте имя и username бота.
+4. Скопируйте токен вида:
+
+```text
+123456789:AA....
+```
+
+Это значение нужно записать в `.env` как `TELEGRAM_BOT_TOKEN`.
+
+### 2. Подключите бота к Telegram Business
+
+В Telegram откройте:
+
+```text
+Настройки -> Telegram Business -> Чат-боты
+```
+
+Дальше:
+
+1. Добавьте созданного бота.
+2. Разрешите ему читать сообщения.
+3. Разрешите ему отвечать на сообщения.
+4. Выберите чаты, где он должен работать. Для начала лучше включить только один тестовый личный чат.
+
+После этого бот начнет получать личные сообщения, которые подходят под выбранные вами правила Business.
+
+## Настройка проекта
+
+Создайте `.env`:
 
 ```bash
 cp .env.example .env
 ```
 
-4. Заполните `.env`:
-
-```env
-TELEGRAM_API_ID=123456
-TELEGRAM_API_HASH=your_telegram_api_hash
-TELEGRAM_SESSION_PATH=data/telegram_user.session
-
-OPENAI_API_KEY=sk-your-openai-key
-OPENAI_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe
-OPENAI_TRANSCRIBE_LANGUAGE=ru
-
-DOWNLOAD_DIR=downloads
-MAX_PARALLEL_TRANSCRIPTIONS=2
-TRANSCRIPT_PREFIX=Расшифровка:
-REPLY_TO_VOICE=true
-```
-
-## Первый запуск локально
-
-Первый запуск лучше сделать локально или в интерактивной SSH-сессии, потому что Telegram попросит номер телефона, код из Telegram и, если включена, 2FA-пароль.
-
-```bash
-python -m venv .venv
-. .venv/Scripts/activate
-pip install -r requirements.txt
-python -m src.main
-```
-
-На Windows в PowerShell активация окружения:
+На Windows PowerShell:
 
 ```powershell
-python -m venv .venv
+copy .env.example .env
+```
+
+Заполните `.env`:
+
+```env
+TELEGRAM_BOT_TOKEN=123456789:your_botfather_token
+
+WHISPER_MODEL=large-v3-turbo
+WHISPER_LANGUAGE=ru
+WHISPER_DEVICE=auto
+WHISPER_COMPUTE_TYPE=auto
+WHISPER_BEAM_SIZE=5
+
+DOWNLOAD_DIR=downloads
+MAX_PARALLEL_TRANSCRIPTIONS=1
+TRANSCRIPT_PREFIX=Расшифровка:
+REPLY_TO_VOICE=true
+POLLING_TIMEOUT=30
+```
+
+## Локальный запуск
+
+Windows PowerShell:
+
+```powershell
+py -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+py -m pip install -r requirements.txt
+py -m src.main
+```
+
+Linux/macOS:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
 python -m src.main
 ```
 
-После успешного входа появится файл сессии в `data/telegram_user.session`. Его нужно сохранить на сервере, чтобы повторно не логиниться.
+При первом распознавании модель `large-v3-turbo` скачается с Hugging Face. Потом она будет использоваться из локального кэша.
 
-## Запуск на сервере
+## Запуск на VPS через Docker
 
-На сервере должны быть установлены `git`, Docker и Docker Compose.
+### 1. Установите Docker
+
+Ubuntu/Debian:
+
+```bash
+sudo apt update
+sudo apt install -y git docker.io docker-compose-plugin
+sudo systemctl enable --now docker
+```
+
+Если ваш пользователь не в группе Docker:
+
+```bash
+sudo usermod -aG docker $USER
+```
+
+После этого перелогиньтесь в SSH.
+
+### 2. Загрузите проект
 
 ```bash
 git clone https://github.com/middtho-dev/telegram-voice-transcriber.git
@@ -72,38 +137,65 @@ cp .env.example .env
 nano .env
 ```
 
-Если вы уже авторизовались локально, перенесите папку `data/` на сервер рядом с `docker-compose.yml`.
+Вставьте `TELEGRAM_BOT_TOKEN` и сохраните файл.
 
-Запуск:
+### 3. Запустите
 
 ```bash
 docker compose up -d --build
+```
+
+Посмотреть логи:
+
+```bash
 docker compose logs -f telegram-voice-transcriber
 ```
 
-Остановка:
+Остановить:
 
 ```bash
 docker compose down
 ```
 
-## Обновления на сервере
-
-Все обновления можно делать прямо на сервере:
+Перезапустить после изменения `.env`:
 
 ```bash
-bash scripts/update-server.sh
+docker compose up -d
 ```
 
-Скрипт подтянет свежий код, пересоберет контейнер и покажет последние логи.
+Модель кэшируется в папке `models/`, чтобы не скачиваться заново после пересборки контейнера.
 
 ## Полезные настройки
 
-- `OPENAI_TRANSCRIBE_LANGUAGE=ru` помогает модели ожидать русский язык. Можно оставить пустым для автоопределения.
-- `MAX_PARALLEL_TRANSCRIPTIONS=2` ограничивает параллельные расшифровки.
-- `TRANSCRIPT_PREFIX=` можно сделать пустым, если не нужен заголовок перед текстом.
-- `REPLY_TO_VOICE=false` отправит расшифровку обычным сообщением в чат, а не ответом.
+- `WHISPER_MODEL=large-v3-turbo` - хороший баланс качества и скорости.
+- `WHISPER_MODEL=large-v3` - выше качество, но тяжелее.
+- `WHISPER_MODEL=medium` - быстрее и легче для слабой VPS.
+- `WHISPER_MODEL=small` - если VPS совсем слабая.
+- `WHISPER_LANGUAGE=ru` - ожидаемый язык голосовых. Оставьте пустым для автоопределения.
+- `WHISPER_DEVICE=auto` - автоматический выбор CPU/GPU.
+- `WHISPER_COMPUTE_TYPE=int8` - часто лучший вариант для CPU и слабых VPS.
+- `MAX_PARALLEL_TRANSCRIPTIONS=1` - безопасно для VPS без GPU.
+- `TRANSCRIPT_PREFIX=` - пустое значение уберет заголовок перед текстом.
+- `REPLY_TO_VOICE=false` - отправлять текст обычным сообщением, а не ответом.
+
+Для слабой VPS обычно лучше так:
+
+```env
+WHISPER_MODEL=medium
+WHISPER_COMPUTE_TYPE=int8
+MAX_PARALLEL_TRANSCRIPTIONS=1
+```
 
 ## Безопасность
 
-Не коммитьте `.env` и файл `data/telegram_user.session`: сессия дает доступ к вашему Telegram-аккаунту. Они уже добавлены в `.gitignore`.
+- Не публикуйте `.env`.
+- Не отправляйте никому `TELEGRAM_BOT_TOKEN`.
+- Если токен утек, откройте `@BotFather` и перевыпустите его через `/revoke`.
+- Бота можно отключить в любой момент: `Настройки -> Telegram Business -> Чат-боты`.
+
+## Ограничения
+
+- Это работает для личных Business-чатов, а не для чтения всех групп и каналов аккаунта.
+- Бот получает только те чаты и сообщения, которые разрешены в настройках Telegram Business.
+- Для первого скачивания модели нужен интернет.
+- Само распознавание после скачивания модели выполняется локально.
