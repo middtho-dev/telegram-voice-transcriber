@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from .config import Settings, load_settings
+from .postprocess import improve_transcript, parse_replacements
 from .storage import MessageStorage, extract_attachment_specs
 from .support import generate_vpn_support_reply
 from .transcriber import VoiceTranscriber
@@ -30,6 +31,9 @@ SETTING_REPLY_TO_VOICE = "reply_to_voice"
 SETTING_AUTO_DELETE_OWN_VOICE = "auto_delete_own_voice"
 SETTING_TRANSCRIPT_PREFIX_ENABLED = "transcript_prefix_enabled"
 SETTING_TRANSCRIPT_PREFIX = "transcript_prefix"
+SETTING_TRANSCRIPT_CLEANUP_ENABLED = "transcript_cleanup_enabled"
+SETTING_PRESERVE_PROFANITY = "preserve_profanity"
+SETTING_TRANSCRIPT_REPLACEMENTS = "transcript_replacements"
 SETTING_VPN_SUPPORT_ENABLED = "vpn_support_enabled"
 SETTING_SUPPORT_LEARNING_ENABLED = "support_learning_enabled"
 SETTING_SUPPORT_SERVICE_NAME = "support_service_name"
@@ -420,6 +424,26 @@ class TelegramBusinessVoiceTranscriberApp:
                 chat_id=chat_id,
                 text="✏️ Напишите новый префикс расшифровки. Например: Расшифровка:",
             )
+        elif data == "toggle:transcript_cleanup":
+            self._toggle_bool(SETTING_TRANSCRIPT_CLEANUP_ENABLED, True)
+            await self._telegram.answer_callback_query(callback_id, "Готово")
+            await self._edit_settings(chat_id, message_id)
+        elif data == "toggle:preserve_profanity":
+            self._toggle_bool(SETTING_PRESERVE_PROFANITY, True)
+            await self._telegram.answer_callback_query(callback_id, "Готово")
+            await self._edit_settings(chat_id, message_id)
+        elif data == "settings:edit_replacements":
+            self._storage.set_value(SETTING_PENDING_ADMIN_ACTION, "edit_replacements")
+            await self._telegram.answer_callback_query(callback_id)
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text=(
+                    "✏️ Пришлите словарь автозамен, каждая замена с новой строки:\n\n"
+                    "ошибка => правильно\n"
+                    "серега => Серёга\n"
+                    "open ai => OpenAI"
+                ),
+            )
         elif data == "toggle:vpn_support":
             self._toggle_bool(SETTING_VPN_SUPPORT_ENABLED, False)
             await self._telegram.answer_callback_query(callback_id, "Готово")
@@ -464,6 +488,7 @@ class TelegramBusinessVoiceTranscriberApp:
                 await self._maybe_delete_own_voice(message)
                 logger.info("Transcribing voice message chat=%s id=%s", chat_id, message_id)
                 text = await self._transcriber.transcribe(audio_path)
+                text = self._improve_transcript(text)
                 await self._send_transcript(
                     business_connection_id=business_connection_id,
                     chat_id=chat_id,
@@ -597,6 +622,17 @@ class TelegramBusinessVoiceTranscriberApp:
             self._storage.set_bool(SETTING_TRANSCRIPT_PREFIX_ENABLED, True)
             self._storage.set_value(SETTING_PENDING_ADMIN_ACTION, "")
             await self._telegram.send_message(chat_id=chat_id, text=f"✅ Префикс расшифровки сохранён: {value[:80]}")
+            await self._send_menu(chat_id)
+            return True
+
+        if action == "edit_replacements":
+            replacements = parse_replacements(value)
+            self._storage.set_value(SETTING_TRANSCRIPT_REPLACEMENTS, value[:4000])
+            self._storage.set_value(SETTING_PENDING_ADMIN_ACTION, "")
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text=f"✅ Словарь автозамен сохранён. Активных замен: {len(replacements)}",
+            )
             await self._send_menu(chat_id)
             return True
 
@@ -788,6 +824,9 @@ class TelegramBusinessVoiceTranscriberApp:
             f"🧽 Удалять мои voice после расшифровки: {self._state_text(self._auto_delete_own_voice())}\n\n"
             f"🏷 Префикс расшифровки: {self._state_text(self._transcript_prefix_enabled())}\n"
             f"Текст префикса: {self._transcript_prefix_value() or 'пусто'}\n\n"
+            f"🪄 Улучшать расшифровку: {self._state_text(self._transcript_cleanup_enabled())}\n"
+            f"🤬 Сохранять мат/разговорность: {self._state_text(self._preserve_profanity())}\n"
+            f"🧾 Автозамен: {len(self._transcript_replacements())}\n\n"
             f"🤖 Модель: {self._settings.whisper_model}\n"
             f"🌐 Язык: {self._settings.whisper_language or 'auto'}"
         )
@@ -954,6 +993,19 @@ class TelegramBusinessVoiceTranscriberApp:
                     }
                 ],
                 [{"text": "✏️ Изменить префикс", "callback_data": "settings:edit_transcript_prefix"}],
+                [
+                    {
+                        "text": f"🪄 Улучшать текст: {self._state_text(self._transcript_cleanup_enabled())}",
+                        "callback_data": "toggle:transcript_cleanup",
+                    }
+                ],
+                [
+                    {
+                        "text": f"🤬 Мат/разговорность: {self._state_text(self._preserve_profanity())}",
+                        "callback_data": "toggle:preserve_profanity",
+                    }
+                ],
+                [{"text": "🧾 Словарь автозамен", "callback_data": "settings:edit_replacements"}],
                 [{"text": "⬅️ Назад", "callback_data": "menu:main"}],
             ]
         }
@@ -1039,6 +1091,24 @@ class TelegramBusinessVoiceTranscriberApp:
         if not self._transcript_prefix_enabled():
             return ""
         return self._transcript_prefix_value()
+
+    def _transcript_cleanup_enabled(self) -> bool:
+        return self._storage.get_bool(SETTING_TRANSCRIPT_CLEANUP_ENABLED, True)
+
+    def _preserve_profanity(self) -> bool:
+        return self._storage.get_bool(SETTING_PRESERVE_PROFANITY, True)
+
+    def _transcript_replacements(self) -> dict[str, str]:
+        return parse_replacements(self._storage.get_value(SETTING_TRANSCRIPT_REPLACEMENTS) or "")
+
+    def _improve_transcript(self, text: str) -> str:
+        if not self._transcript_cleanup_enabled():
+            return text
+        return improve_transcript(
+            text,
+            custom_replacements=self._transcript_replacements(),
+            preserve_profanity=self._preserve_profanity(),
+        )
 
     def _vpn_support_enabled(self) -> bool:
         return self._storage.get_bool(SETTING_VPN_SUPPORT_ENABLED, False)
