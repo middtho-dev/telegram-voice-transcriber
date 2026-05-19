@@ -27,6 +27,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 SETTING_STORAGE_ENABLED = "storage_enabled"
 SETTING_TRANSCRIPTION_ENABLED = "transcription_enabled"
 SETTING_REPLY_TO_VOICE = "reply_to_voice"
+SETTING_AUTO_DELETE_OWN_VOICE = "auto_delete_own_voice"
 SETTING_VPN_SUPPORT_ENABLED = "vpn_support_enabled"
 SETTING_SUPPORT_LEARNING_ENABLED = "support_learning_enabled"
 SETTING_SUPPORT_SERVICE_NAME = "support_service_name"
@@ -166,6 +167,20 @@ class TelegramBusinessBotClient:
             }
 
         await self._request("sendMessage", payload)
+
+    async def delete_business_messages(
+        self,
+        *,
+        business_connection_id: str,
+        message_ids: list[int],
+    ) -> None:
+        await self._request(
+            "deleteBusinessMessages",
+            {
+                "business_connection_id": business_connection_id,
+                "message_ids": message_ids,
+            },
+        )
 
     async def _request(
         self,
@@ -388,6 +403,10 @@ class TelegramBusinessVoiceTranscriberApp:
             self._toggle_bool(SETTING_REPLY_TO_VOICE, self._settings.reply_to_voice)
             await self._telegram.answer_callback_query(callback_id, "Готово")
             await self._edit_settings(chat_id, message_id)
+        elif data == "toggle:auto_delete_own_voice":
+            self._toggle_bool(SETTING_AUTO_DELETE_OWN_VOICE, False)
+            await self._telegram.answer_callback_query(callback_id, "Готово")
+            await self._edit_settings(chat_id, message_id)
         elif data == "toggle:vpn_support":
             self._toggle_bool(SETTING_VPN_SUPPORT_ENABLED, False)
             await self._telegram.answer_callback_query(callback_id, "Готово")
@@ -429,6 +448,7 @@ class TelegramBusinessVoiceTranscriberApp:
                     audio_path = await self._download_voice(message)
                     should_delete_audio = True
 
+                await self._maybe_delete_own_voice(message)
                 logger.info("Transcribing voice message chat=%s id=%s", chat_id, message_id)
                 text = await self._transcriber.transcribe(audio_path)
                 await self._send_transcript(
@@ -484,6 +504,29 @@ class TelegramBusinessVoiceTranscriberApp:
             message["chat"]["id"],
             message["message_id"],
         )
+
+    async def _maybe_delete_own_voice(self, message: dict[str, Any]) -> None:
+        if not self._auto_delete_own_voice():
+            return
+        if not self._is_admin(int((message.get("from") or {}).get("id", 0))):
+            return
+
+        try:
+            await self._telegram.delete_business_messages(
+                business_connection_id=message["business_connection_id"],
+                message_ids=[int(message["message_id"])],
+            )
+            logger.info(
+                "Deleted own voice message chat=%s id=%s",
+                message["chat"]["id"],
+                message["message_id"],
+            )
+        except TelegramApiError:
+            logger.exception(
+                "Failed to delete own voice message chat=%s id=%s. Check Telegram Business delete permissions.",
+                message["chat"]["id"],
+                message["message_id"],
+            )
 
     async def _maybe_learn_support_reply(self, message: dict[str, Any]) -> None:
         if not self._support_learning_enabled():
@@ -721,6 +764,7 @@ class TelegramBusinessVoiceTranscriberApp:
             f"🗄 Сохранять сообщения: {self._state_text(self._storage_enabled())}\n"
             f"🎙 Расшифровывать голосовые: {self._state_text(self._transcription_enabled())}\n"
             f"↩️ Отвечать реплаем: {self._state_text(self._reply_to_voice())}\n\n"
+            f"🧽 Удалять мои voice после расшифровки: {self._state_text(self._auto_delete_own_voice())}\n\n"
             f"🤖 Модель: {self._settings.whisper_model}\n"
             f"🌐 Язык: {self._settings.whisper_language or 'auto'}"
         )
@@ -874,6 +918,12 @@ class TelegramBusinessVoiceTranscriberApp:
                         "callback_data": "toggle:reply",
                     }
                 ],
+                [
+                    {
+                        "text": f"🧽 Удалять мои voice: {self._state_text(self._auto_delete_own_voice())}",
+                        "callback_data": "toggle:auto_delete_own_voice",
+                    }
+                ],
                 [{"text": "⬅️ Назад", "callback_data": "menu:main"}],
             ]
         }
@@ -939,6 +989,9 @@ class TelegramBusinessVoiceTranscriberApp:
 
     def _reply_to_voice(self) -> bool:
         return self._storage.get_bool(SETTING_REPLY_TO_VOICE, self._settings.reply_to_voice)
+
+    def _auto_delete_own_voice(self) -> bool:
+        return self._storage.get_bool(SETTING_AUTO_DELETE_OWN_VOICE, False)
 
     def _vpn_support_enabled(self) -> bool:
         return self._storage.get_bool(SETTING_VPN_SUPPORT_ENABLED, False)
