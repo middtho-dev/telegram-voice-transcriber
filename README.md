@@ -9,9 +9,10 @@
 1. Вы создаете обычного Telegram-бота через `@BotFather`.
 2. Подключаете этого бота в настройках Telegram Business вашего аккаунта.
 3. Telegram присылает боту события `business_message` из личных чатов.
-4. Если сообщение голосовое, приложение скачивает `.ogg` через Bot API.
-5. Локальная модель Whisper распознает аудио.
+4. Приложение сохраняет текст и вложения в локальную SQLite-базу.
+5. Если сообщение голосовое, локальная модель Whisper распознает аудио.
 6. Бот отправляет расшифровку обратно в чат через Business-соединение.
+7. В личном чате с ботом администратор может открыть меню, менять настройки и выгружать архив.
 
 Такой вариант не логинится в ваш Telegram-аккаунт через код и не хранит файл сессии аккаунта на сервере. На VPS хранится только токен бота.
 
@@ -39,14 +40,13 @@
 
 ### 2. Подключите бота к Telegram Business
 
-Сначала включите Business Mode у самого бота:
+Сначала включите Business-доступ у самого бота:
 
 1. Откройте `@BotFather`.
 2. Отправьте `/mybots`.
 3. Выберите своего бота.
 4. Откройте `Bot Settings`.
-5. Откройте `Business Mode`.
-6. Нажмите `Turn On`.
+5. Включите `Chat Access Mode`. В некоторых версиях BotFather этот пункт может называться `Business Mode`.
 
 Если этот пункт не включить, Telegram может написать, что бот не поддерживает Business.
 
@@ -83,6 +83,7 @@ copy .env.example .env
 
 ```env
 TELEGRAM_BOT_TOKEN=123456789:your_botfather_token
+ADMIN_USER_IDS=123456789
 
 WHISPER_MODEL=large-v3-turbo
 WHISPER_LANGUAGE=ru
@@ -90,12 +91,18 @@ WHISPER_DEVICE=auto
 WHISPER_COMPUTE_TYPE=auto
 WHISPER_BEAM_SIZE=5
 
+DATA_DIR=storage
+DATABASE_PATH=storage/messages.sqlite3
+ATTACHMENTS_DIR=storage/attachments
+EXPORTS_DIR=storage/exports
 DOWNLOAD_DIR=downloads
 MAX_PARALLEL_TRANSCRIPTIONS=1
 TRANSCRIPT_PREFIX=Расшифровка:
 REPLY_TO_VOICE=true
 POLLING_TIMEOUT=30
 ```
+
+`ADMIN_USER_IDS` - это ваш числовой Telegram ID. Если вы его не знаете, запустите бота и напишите ему `/start` обычным личным сообщением. Бот ответит вашим ID. После этого вставьте ID в `.env` и перезапустите контейнер.
 
 ## Локальный запуск
 
@@ -148,7 +155,7 @@ cp .env.example .env
 nano .env
 ```
 
-Вставьте `TELEGRAM_BOT_TOKEN` и сохраните файл.
+Вставьте `TELEGRAM_BOT_TOKEN`, настройте `ADMIN_USER_IDS` и сохраните файл.
 
 ### 3. Запустите
 
@@ -176,6 +183,28 @@ docker compose up -d
 
 Модель кэшируется в папке `models/`, чтобы не скачиваться заново после пересборки контейнера.
 
+База и вложения хранятся в папке `storage/` рядом с `docker-compose.yml`. Эта папка подключена в контейнер как volume, поэтому данные не пропадают при пересборке.
+
+## Меню управления
+
+Напишите своему боту обычное личное сообщение:
+
+```text
+/start
+```
+
+Если ваш Telegram ID добавлен в `ADMIN_USER_IDS`, бот покажет меню:
+
+- `Статистика` - количество сохраненных сообщений, вложений и чатов.
+- `Настройки` - переключатели хранения сообщений, расшифровки голосовых и режима ответа реплаем.
+- `Выгрузить архив` - отправляет ZIP с `messages.sqlite3`, `messages.csv`, `messages.jsonl` и папкой `attachments/`.
+
+Если архив слишком большой и Telegram не сможет его отправить, заберите файл напрямую с VPS:
+
+```bash
+ls -lh ~/telegram-voice-transcriber/storage/exports
+```
+
 ## Полезные настройки
 
 - `WHISPER_MODEL=large-v3-turbo` - хороший баланс качества и скорости.
@@ -188,6 +217,10 @@ docker compose up -d
 - `MAX_PARALLEL_TRANSCRIPTIONS=1` - безопасно для VPS без GPU.
 - `TRANSCRIPT_PREFIX=` - пустое значение уберет заголовок перед текстом.
 - `REPLY_TO_VOICE=false` - отправлять текст обычным сообщением, а не ответом.
+- `ADMIN_USER_IDS=123,456` - пользователи, которым доступно меню управления.
+- `DATABASE_PATH=storage/messages.sqlite3` - путь к SQLite-базе сообщений.
+- `ATTACHMENTS_DIR=storage/attachments` - папка для сохраненных вложений.
+- `EXPORTS_DIR=storage/exports` - папка для ZIP-выгрузок.
 
 Для слабой VPS обычно лучше так:
 

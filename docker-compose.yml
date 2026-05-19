@@ -7,4 +7,5 @@ services:
       - .env
     volumes:
       - ./downloads:/app/downloads
+      - ./storage:/app/storage
       - ./models:/root/.cache/huggingface

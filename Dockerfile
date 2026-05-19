@@ -15,6 +15,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src ./src
 COPY README.md .
 
-RUN mkdir -p /app/downloads
+RUN mkdir -p /app/downloads /app/storage
 
 CMD ["python", "-m", "src.main"]
