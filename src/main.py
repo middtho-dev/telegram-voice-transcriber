@@ -28,6 +28,8 @@ SETTING_STORAGE_ENABLED = "storage_enabled"
 SETTING_TRANSCRIPTION_ENABLED = "transcription_enabled"
 SETTING_REPLY_TO_VOICE = "reply_to_voice"
 SETTING_AUTO_DELETE_OWN_VOICE = "auto_delete_own_voice"
+SETTING_TRANSCRIPT_PREFIX_ENABLED = "transcript_prefix_enabled"
+SETTING_TRANSCRIPT_PREFIX = "transcript_prefix"
 SETTING_VPN_SUPPORT_ENABLED = "vpn_support_enabled"
 SETTING_SUPPORT_LEARNING_ENABLED = "support_learning_enabled"
 SETTING_SUPPORT_SERVICE_NAME = "support_service_name"
@@ -407,6 +409,17 @@ class TelegramBusinessVoiceTranscriberApp:
             self._toggle_bool(SETTING_AUTO_DELETE_OWN_VOICE, False)
             await self._telegram.answer_callback_query(callback_id, "Готово")
             await self._edit_settings(chat_id, message_id)
+        elif data == "toggle:transcript_prefix":
+            self._toggle_bool(SETTING_TRANSCRIPT_PREFIX_ENABLED, bool(self._settings.transcript_prefix))
+            await self._telegram.answer_callback_query(callback_id, "Готово")
+            await self._edit_settings(chat_id, message_id)
+        elif data == "settings:edit_transcript_prefix":
+            self._storage.set_value(SETTING_PENDING_ADMIN_ACTION, "edit_transcript_prefix")
+            await self._telegram.answer_callback_query(callback_id)
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text="✏️ Напишите новый префикс расшифровки. Например: Расшифровка:",
+            )
         elif data == "toggle:vpn_support":
             self._toggle_bool(SETTING_VPN_SUPPORT_ENABLED, False)
             await self._telegram.answer_callback_query(callback_id, "Готово")
@@ -579,6 +592,14 @@ class TelegramBusinessVoiceTranscriberApp:
             await self._send_menu(chat_id)
             return True
 
+        if action == "edit_transcript_prefix":
+            self._storage.set_value(SETTING_TRANSCRIPT_PREFIX, value[:80])
+            self._storage.set_bool(SETTING_TRANSCRIPT_PREFIX_ENABLED, True)
+            self._storage.set_value(SETTING_PENDING_ADMIN_ACTION, "")
+            await self._telegram.send_message(chat_id=chat_id, text=f"✅ Префикс расшифровки сохранён: {value[:80]}")
+            await self._send_menu(chat_id)
+            return True
+
         self._storage.set_value(SETTING_PENDING_ADMIN_ACTION, "")
         return False
 
@@ -617,7 +638,7 @@ class TelegramBusinessVoiceTranscriberApp:
         message_id: int,
         text: str,
     ) -> None:
-        prefix = self._settings.transcript_prefix
+        prefix = self._transcript_prefix()
         message = f"{prefix}\n{text}" if prefix else text
         reply_to = message_id if self._reply_to_voice() else None
 
@@ -765,6 +786,8 @@ class TelegramBusinessVoiceTranscriberApp:
             f"🎙 Расшифровывать голосовые: {self._state_text(self._transcription_enabled())}\n"
             f"↩️ Отвечать реплаем: {self._state_text(self._reply_to_voice())}\n\n"
             f"🧽 Удалять мои voice после расшифровки: {self._state_text(self._auto_delete_own_voice())}\n\n"
+            f"🏷 Префикс расшифровки: {self._state_text(self._transcript_prefix_enabled())}\n"
+            f"Текст префикса: {self._transcript_prefix_value() or 'пусто'}\n\n"
             f"🤖 Модель: {self._settings.whisper_model}\n"
             f"🌐 Язык: {self._settings.whisper_language or 'auto'}"
         )
@@ -924,6 +947,13 @@ class TelegramBusinessVoiceTranscriberApp:
                         "callback_data": "toggle:auto_delete_own_voice",
                     }
                 ],
+                [
+                    {
+                        "text": f"🏷 Префикс: {self._state_text(self._transcript_prefix_enabled())}",
+                        "callback_data": "toggle:transcript_prefix",
+                    }
+                ],
+                [{"text": "✏️ Изменить префикс", "callback_data": "settings:edit_transcript_prefix"}],
                 [{"text": "⬅️ Назад", "callback_data": "menu:main"}],
             ]
         }
@@ -992,6 +1022,23 @@ class TelegramBusinessVoiceTranscriberApp:
 
     def _auto_delete_own_voice(self) -> bool:
         return self._storage.get_bool(SETTING_AUTO_DELETE_OWN_VOICE, False)
+
+    def _transcript_prefix_enabled(self) -> bool:
+        return self._storage.get_bool(
+            SETTING_TRANSCRIPT_PREFIX_ENABLED,
+            bool(self._settings.transcript_prefix),
+        )
+
+    def _transcript_prefix_value(self) -> str:
+        value = self._storage.get_value(SETTING_TRANSCRIPT_PREFIX)
+        if value is None:
+            return self._settings.transcript_prefix
+        return value.strip()
+
+    def _transcript_prefix(self) -> str:
+        if not self._transcript_prefix_enabled():
+            return ""
+        return self._transcript_prefix_value()
 
     def _vpn_support_enabled(self) -> bool:
         return self._storage.get_bool(SETTING_VPN_SUPPORT_ENABLED, False)
