@@ -28,6 +28,7 @@ SETTING_STORAGE_ENABLED = "storage_enabled"
 SETTING_TRANSCRIPTION_ENABLED = "transcription_enabled"
 SETTING_REPLY_TO_VOICE = "reply_to_voice"
 SETTING_VPN_SUPPORT_ENABLED = "vpn_support_enabled"
+SETTING_SUPPORT_LEARNING_ENABLED = "support_learning_enabled"
 
 
 class TelegramApiError(RuntimeError):
@@ -355,6 +356,10 @@ class TelegramBusinessVoiceTranscriberApp:
             self._toggle_bool(SETTING_VPN_SUPPORT_ENABLED, False)
             await self._telegram.answer_callback_query(callback_id, "Готово")
             await self._edit_settings(chat_id, message_id)
+        elif data == "toggle:support_learning":
+            self._toggle_bool(SETTING_SUPPORT_LEARNING_ENABLED, False)
+            await self._telegram.answer_callback_query(callback_id, "Готово")
+            await self._edit_settings(chat_id, message_id)
         else:
             await self._telegram.answer_callback_query(callback_id)
 
@@ -369,6 +374,7 @@ class TelegramBusinessVoiceTranscriberApp:
                 if self._storage_enabled():
                     attachments = await self._download_attachments(message)
                     await asyncio.to_thread(self._storage.save_message, message, attachments)
+                    await self._maybe_learn_support_reply(message)
                     logger.info("Archived message chat=%s id=%s", chat_id, message_id)
 
                 if not self._is_voice(message) or not self._transcription_enabled():
@@ -412,11 +418,16 @@ class TelegramBusinessVoiceTranscriberApp:
         if not text:
             return
 
-        reply = generate_vpn_support_reply(
-            text,
-            service_name=self._settings.support_service_name,
-            support_contact=self._settings.support_contact,
-        )
+        reply = None
+        if self._support_learning_enabled():
+            reply = await asyncio.to_thread(self._storage.find_learned_reply, text)
+
+        if reply is None:
+            reply = generate_vpn_support_reply(
+                text,
+                service_name=self._settings.support_service_name,
+                support_contact=self._settings.support_contact,
+            )
         if not reply:
             return
 
@@ -431,6 +442,33 @@ class TelegramBusinessVoiceTranscriberApp:
             message["chat"]["id"],
             message["message_id"],
         )
+
+    async def _maybe_learn_support_reply(self, message: dict[str, Any]) -> None:
+        if not self._support_learning_enabled():
+            return
+        if not self._is_admin(int((message.get("from") or {}).get("id", 0))):
+            return
+
+        answer_text = (message.get("text") or message.get("caption") or "").strip()
+        reply = message.get("reply_to_message") or {}
+        question_text = (reply.get("text") or reply.get("caption") or "").strip()
+        if not answer_text or not question_text:
+            return
+
+        learned = await asyncio.to_thread(
+            self._storage.learn_support_reply,
+            question_text=question_text,
+            answer_text=answer_text,
+            source_chat_id=message["chat"]["id"],
+            source_message_id=message["message_id"],
+            reply_to_message_id=reply.get("message_id") or 0,
+        )
+        if learned:
+            logger.info(
+                "Learned support reply chat=%s id=%s",
+                message["chat"]["id"],
+                message["message_id"],
+            )
 
     async def _download_attachments(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         saved: list[dict[str, Any]] = []
@@ -555,6 +593,7 @@ class TelegramBusinessVoiceTranscriberApp:
             f"Сообщений в базе: {stats['messages']}\n"
             f"Вложений: {stats['attachments']}\n"
             f"Чатов: {stats['chats']}\n\n"
+            f"Выученных ответов: {stats['learned_replies']}\n\n"
             "Выберите действие."
         )
 
@@ -565,6 +604,7 @@ class TelegramBusinessVoiceTranscriberApp:
             f"Расшифровывать голосовые: {self._state_text(self._transcription_enabled())}\n"
             f"Отвечать реплаем: {self._state_text(self._reply_to_voice())}\n\n"
             f"VPN-поддержка: {self._state_text(self._vpn_support_enabled())}\n"
+            f"Обучение поддержки: {self._state_text(self._support_learning_enabled())}\n"
             f"Название сервиса: {self._settings.support_service_name}\n"
             f"Контакт: {self._settings.support_contact}\n\n"
             f"Модель: {self._settings.whisper_model}\n"
@@ -577,7 +617,8 @@ class TelegramBusinessVoiceTranscriberApp:
             "Статистика архива\n\n"
             f"Сообщений: {stats['messages']}\n"
             f"Вложений: {stats['attachments']}\n"
-            f"Чатов: {stats['chats']}"
+            f"Чатов: {stats['chats']}\n"
+            f"Выученных ответов: {stats['learned_replies']}"
         )
 
     @staticmethod
@@ -635,6 +676,12 @@ class TelegramBusinessVoiceTranscriberApp:
                         "callback_data": "toggle:vpn_support",
                     }
                 ],
+                [
+                    {
+                        "text": f"Обучение: {self._state_text(self._support_learning_enabled())}",
+                        "callback_data": "toggle:support_learning",
+                    }
+                ],
                 [{"text": "Назад", "callback_data": "menu:main"}],
             ]
         }
@@ -653,6 +700,9 @@ class TelegramBusinessVoiceTranscriberApp:
 
     def _vpn_support_enabled(self) -> bool:
         return self._storage.get_bool(SETTING_VPN_SUPPORT_ENABLED, False)
+
+    def _support_learning_enabled(self) -> bool:
+        return self._storage.get_bool(SETTING_SUPPORT_LEARNING_ENABLED, False)
 
     def _is_admin(self, user_id: int) -> bool:
         return user_id in self._settings.admin_user_ids

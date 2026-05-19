@@ -3,10 +3,12 @@ from __future__ import annotations
 import csv
 import html
 import json
+import re
 import shutil
 import sqlite3
 import zipfile
 from datetime import UTC, datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +82,22 @@ class MessageStorage:
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learned_replies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    normalized_question TEXT NOT NULL UNIQUE,
+                    question_text TEXT NOT NULL,
+                    answer_text TEXT NOT NULL,
+                    source_chat_id INTEGER,
+                    source_message_id INTEGER,
+                    reply_to_message_id INTEGER,
+                    hits INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 )
                 """
             )
@@ -235,12 +253,95 @@ class MessageStorage:
             messages = connection.execute("SELECT COUNT(*) AS count FROM messages").fetchone()
             attachments = connection.execute("SELECT COUNT(*) AS count FROM attachments").fetchone()
             chats = connection.execute("SELECT COUNT(DISTINCT chat_id) AS count FROM messages").fetchone()
+            learned = connection.execute("SELECT COUNT(*) AS count FROM learned_replies").fetchone()
 
         return {
             "messages": int(messages["count"]),
             "attachments": int(attachments["count"]),
             "chats": int(chats["count"]),
+            "learned_replies": int(learned["count"]),
         }
+
+    def learn_support_reply(
+        self,
+        *,
+        question_text: str,
+        answer_text: str,
+        source_chat_id: int,
+        source_message_id: int,
+        reply_to_message_id: int,
+    ) -> bool:
+        normalized_question = _normalize_learning_text(question_text)
+        answer_text = answer_text.strip()
+        if len(normalized_question) < 8 or len(answer_text) < 8:
+            return False
+
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO learned_replies (
+                    normalized_question,
+                    question_text,
+                    answer_text,
+                    source_chat_id,
+                    source_message_id,
+                    reply_to_message_id,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(normalized_question) DO UPDATE SET
+                    answer_text = excluded.answer_text,
+                    source_chat_id = excluded.source_chat_id,
+                    source_message_id = excluded.source_message_id,
+                    reply_to_message_id = excluded.reply_to_message_id,
+                    hits = learned_replies.hits + 1,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    normalized_question,
+                    question_text.strip(),
+                    answer_text,
+                    source_chat_id,
+                    source_message_id,
+                    reply_to_message_id,
+                    now,
+                    now,
+                ),
+            )
+        return True
+
+    def find_learned_reply(self, text: str, min_score: float = 0.72) -> str | None:
+        normalized = _normalize_learning_text(text)
+        if len(normalized) < 8:
+            return None
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT normalized_question, answer_text
+                FROM learned_replies
+                ORDER BY updated_at DESC
+                LIMIT 500
+                """
+            ).fetchall()
+
+        best_score = 0.0
+        best_answer: str | None = None
+        for row in rows:
+            candidate = str(row["normalized_question"])
+            score = max(
+                SequenceMatcher(None, normalized, candidate).ratio(),
+                _token_overlap_score(normalized, candidate),
+            )
+            if score > best_score:
+                best_score = score
+                best_answer = str(row["answer_text"])
+
+        if best_score >= min_score:
+            return best_answer
+        return None
 
     def create_export_zip(
         self,
@@ -641,6 +742,31 @@ def _reply_media_label(message: dict[str, Any]) -> str:
     if message_type == "unknown":
         return ""
     return f"[{message_type}]"
+
+
+def _normalize_learning_text(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", re.sub(r"[^\w\s]+", " ", text.casefold())).strip()
+    replacements = {
+        "впн": "vpn",
+        "айфон": "iphone",
+        "айфоне": "iphone",
+        "айфона": "iphone",
+        "андроид": "android",
+        "макбук": "macbook",
+        "виндовс": "windows",
+        "винда": "windows",
+    }
+    for source, target in replacements.items():
+        normalized = re.sub(rf"\b{source}\b", target, normalized)
+    return normalized
+
+
+def _token_overlap_score(left: str, right: str) -> float:
+    left_tokens = set(left.split())
+    right_tokens = set(right.split())
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
 
 
 def _format_telegram_time(value: Any) -> str:
