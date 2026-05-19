@@ -49,6 +49,8 @@ class Settings:
     transcript_prefix: str
     reply_to_voice: bool
     polling_timeout: int
+    support_service_name: str
+    support_contact: str
 
 
 def load_settings() -> Settings:
@@ -73,4 +75,6 @@ def load_settings() -> Settings:
         transcript_prefix=os.getenv("TRANSCRIPT_PREFIX", "Расшифровка:").strip(),
         reply_to_voice=_bool("REPLY_TO_VOICE", True),
         polling_timeout=max(1, int(os.getenv("POLLING_TIMEOUT", "30"))),
+        support_service_name=os.getenv("SUPPORT_SERVICE_NAME", "VPN").strip() or "VPN",
+        support_contact=os.getenv("SUPPORT_CONTACT", "оператору").strip() or "оператору",
     )

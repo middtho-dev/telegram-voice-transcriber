@@ -13,6 +13,7 @@ import httpx
 
 from .config import Settings, load_settings
 from .storage import MessageStorage, extract_attachment_specs
+from .support import generate_vpn_support_reply
 from .transcriber import VoiceTranscriber
 
 
@@ -26,6 +27,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 SETTING_STORAGE_ENABLED = "storage_enabled"
 SETTING_TRANSCRIPTION_ENABLED = "transcription_enabled"
 SETTING_REPLY_TO_VOICE = "reply_to_voice"
+SETTING_VPN_SUPPORT_ENABLED = "vpn_support_enabled"
 
 
 class TelegramApiError(RuntimeError):
@@ -349,6 +351,10 @@ class TelegramBusinessVoiceTranscriberApp:
             self._toggle_bool(SETTING_REPLY_TO_VOICE, self._settings.reply_to_voice)
             await self._telegram.answer_callback_query(callback_id, "Готово")
             await self._edit_settings(chat_id, message_id)
+        elif data == "toggle:vpn_support":
+            self._toggle_bool(SETTING_VPN_SUPPORT_ENABLED, False)
+            await self._telegram.answer_callback_query(callback_id, "Готово")
+            await self._edit_settings(chat_id, message_id)
         else:
             await self._telegram.answer_callback_query(callback_id)
 
@@ -366,6 +372,7 @@ class TelegramBusinessVoiceTranscriberApp:
                     logger.info("Archived message chat=%s id=%s", chat_id, message_id)
 
                 if not self._is_voice(message) or not self._transcription_enabled():
+                    await self._maybe_send_support_reply(message)
                     return
 
                 audio_path = self._find_voice_path(attachments)
@@ -394,6 +401,36 @@ class TelegramBusinessVoiceTranscriberApp:
                     logger.exception("Telegram API failed for chat=%s id=%s", chat_id, message_id)
             except Exception:
                 logger.exception("Failed to process message chat=%s id=%s", chat_id, message_id)
+
+    async def _maybe_send_support_reply(self, message: dict[str, Any]) -> None:
+        if not self._vpn_support_enabled():
+            return
+        if self._is_admin(int((message.get("from") or {}).get("id", 0))):
+            return
+
+        text = (message.get("text") or message.get("caption") or "").strip()
+        if not text:
+            return
+
+        reply = generate_vpn_support_reply(
+            text,
+            service_name=self._settings.support_service_name,
+            support_contact=self._settings.support_contact,
+        )
+        if not reply:
+            return
+
+        await self._telegram.send_business_message(
+            business_connection_id=message["business_connection_id"],
+            chat_id=message["chat"]["id"],
+            text=reply,
+            reply_to_message_id=message["message_id"],
+        )
+        logger.info(
+            "VPN support reply sent chat=%s id=%s",
+            message["chat"]["id"],
+            message["message_id"],
+        )
 
     async def _download_attachments(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         saved: list[dict[str, Any]] = []
@@ -527,6 +564,9 @@ class TelegramBusinessVoiceTranscriberApp:
             f"Сохранять сообщения: {self._state_text(self._storage_enabled())}\n"
             f"Расшифровывать голосовые: {self._state_text(self._transcription_enabled())}\n"
             f"Отвечать реплаем: {self._state_text(self._reply_to_voice())}\n\n"
+            f"VPN-поддержка: {self._state_text(self._vpn_support_enabled())}\n"
+            f"Название сервиса: {self._settings.support_service_name}\n"
+            f"Контакт: {self._settings.support_contact}\n\n"
             f"Модель: {self._settings.whisper_model}\n"
             f"Язык: {self._settings.whisper_language or 'auto'}"
         )
@@ -589,6 +629,12 @@ class TelegramBusinessVoiceTranscriberApp:
                         "callback_data": "toggle:reply",
                     }
                 ],
+                [
+                    {
+                        "text": f"VPN-поддержка: {self._state_text(self._vpn_support_enabled())}",
+                        "callback_data": "toggle:vpn_support",
+                    }
+                ],
                 [{"text": "Назад", "callback_data": "menu:main"}],
             ]
         }
@@ -604,6 +650,9 @@ class TelegramBusinessVoiceTranscriberApp:
 
     def _reply_to_voice(self) -> bool:
         return self._storage.get_bool(SETTING_REPLY_TO_VOICE, self._settings.reply_to_voice)
+
+    def _vpn_support_enabled(self) -> bool:
+        return self._storage.get_bool(SETTING_VPN_SUPPORT_ENABLED, False)
 
     def _is_admin(self, user_id: int) -> bool:
         return user_id in self._settings.admin_user_ids
