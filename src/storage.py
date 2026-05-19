@@ -47,12 +47,18 @@ class MessageStorage:
                     message_type TEXT NOT NULL,
                     text TEXT,
                     caption TEXT,
+                    reply_to_message_id INTEGER,
+                    reply_to_text TEXT,
+                    reply_to_sender TEXT,
                     raw_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     UNIQUE (business_connection_id, message_id)
                 )
                 """
             )
+            self._ensure_column(connection, "messages", "reply_to_message_id", "INTEGER")
+            self._ensure_column(connection, "messages", "reply_to_text", "TEXT")
+            self._ensure_column(connection, "messages", "reply_to_sender", "TEXT")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS attachments (
@@ -77,6 +83,17 @@ class MessageStorage:
                 )
                 """
             )
+
+    @staticmethod
+    def _ensure_column(
+        connection: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        column_type: str,
+    ) -> None:
+        columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        if column_name not in {str(column["name"]) for column in columns}:
+            connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
     def get_bool(self, key: str, default: bool) -> bool:
         value = self.get_value(key)
@@ -114,6 +131,8 @@ class MessageStorage:
         now = datetime.now(UTC).isoformat()
         chat = message.get("chat") or {}
         sender = message.get("from") or {}
+        reply = message.get("reply_to_message") or {}
+        reply_sender = reply.get("from") or {}
         message_type = detect_message_type(message)
 
         with self._connect() as connection:
@@ -133,14 +152,20 @@ class MessageStorage:
                     message_type,
                     text,
                     caption,
+                    reply_to_message_id,
+                    reply_to_text,
+                    reply_to_sender,
                     raw_json,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(business_connection_id, message_id) DO UPDATE SET
                     raw_json = excluded.raw_json,
                     text = excluded.text,
-                    caption = excluded.caption
+                    caption = excluded.caption,
+                    reply_to_message_id = excluded.reply_to_message_id,
+                    reply_to_text = excluded.reply_to_text,
+                    reply_to_sender = excluded.reply_to_sender
                 """,
                 (
                     message["business_connection_id"],
@@ -156,6 +181,9 @@ class MessageStorage:
                     message_type,
                     message.get("text"),
                     message.get("caption"),
+                    reply.get("message_id"),
+                    reply.get("text") or reply.get("caption") or _reply_media_label(reply),
+                    _message_sender_name(reply_sender),
                     json.dumps(message, ensure_ascii=False),
                     now,
                 ),
@@ -356,13 +384,16 @@ class MessageStorage:
   <title>Telegram Business Archive</title>
   <style>
     :root {{
-      color-scheme: light;
-      --bg: #f4f6f8;
-      --panel: #ffffff;
-      --text: #17212b;
-      --muted: #64748b;
-      --line: #d8dee8;
-      --accent: #168acd;
+      color-scheme: dark;
+      --bg: #0b0f14;
+      --panel: #111821;
+      --panel-2: #151f2b;
+      --text: #e6edf3;
+      --muted: #8b9bad;
+      --line: #253142;
+      --accent: #38bdf8;
+      --accent-2: #22c55e;
+      --shadow: rgba(0, 0, 0, 0.35);
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -376,7 +407,8 @@ class MessageStorage:
       top: 0;
       z-index: 2;
       padding: 18px 22px;
-      background: var(--panel);
+      background: rgba(17, 24, 33, 0.92);
+      backdrop-filter: blur(18px);
       border-bottom: 1px solid var(--line);
     }}
     h1, h2, p {{ margin: 0; }}
@@ -389,7 +421,7 @@ class MessageStorage:
     nav {{
       border-right: 1px solid var(--line);
       padding: 14px;
-      background: #eef2f6;
+      background: #0f151d;
       overflow: auto;
     }}
     .tab {{
@@ -407,9 +439,10 @@ class MessageStorage:
       cursor: pointer;
     }}
     .tab.active {{
-      background: var(--panel);
+      background: var(--panel-2);
       border-color: var(--line);
       color: var(--accent);
+      box-shadow: 0 10px 30px var(--shadow);
     }}
     main {{ padding: 20px; overflow: auto; }}
     .chat {{ display: none; max-width: 980px; margin: 0 auto; }}
@@ -421,6 +454,7 @@ class MessageStorage:
       border-radius: 8px;
       padding: 14px;
       margin-bottom: 12px;
+      box-shadow: 0 12px 36px var(--shadow);
     }}
     .meta {{
       display: flex;
@@ -431,12 +465,42 @@ class MessageStorage:
       margin-bottom: 8px;
     }}
     .content {{ white-space: pre-wrap; overflow-wrap: anywhere; }}
+    .reply {{
+      display: grid;
+      grid-template-columns: 3px minmax(0, 1fr);
+      gap: 10px;
+      margin: 0 0 10px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(56, 189, 248, 0.08);
+      color: var(--text);
+      text-decoration: none;
+    }}
+    .reply-line {{
+      display: block;
+      border-radius: 99px;
+      background: var(--accent);
+    }}
+    .reply strong {{ display: block; color: var(--accent); font-size: 13px; }}
+    .reply em {{
+      display: block;
+      color: var(--muted);
+      font-style: normal;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .message:target {{
+      border-color: var(--accent-2);
+      box-shadow: 0 0 0 1px var(--accent-2), 0 12px 36px var(--shadow);
+    }}
     .attachments {{ display: grid; gap: 10px; margin-top: 12px; }}
     .attachment {{
       padding: 10px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #f8fafc;
+      background: #0f1722;
     }}
     audio, video, img {{ width: 100%; max-width: 720px; display: block; }}
     img {{ height: auto; border-radius: 6px; }}
@@ -480,12 +544,32 @@ class MessageStorage:
             body = f"[{message['message_type']}]"
 
         attachment_html = "".join(self._attachment_html(attachment) for attachment in attachments)
+        reply_html = self._reply_html(message)
         return (
-            '<article class="message">'
+            f'<article class="message" id="message-{message["message_id"]}">'
             f'<div class="meta"><span>{html.escape(sender)}</span><span>{html.escape(message_time)}</span></div>'
+            f"{reply_html}"
             f'<div class="content">{html.escape(str(body))}</div>'
             f'<div class="attachments">{attachment_html}</div>'
             "</article>"
+        )
+
+    @staticmethod
+    def _reply_html(message: dict[str, Any]) -> str:
+        reply_to_message_id = message.get("reply_to_message_id")
+        if not reply_to_message_id:
+            return ""
+
+        sender = html.escape(str(message.get("reply_to_sender") or "сообщение"))
+        text = html.escape(str(message.get("reply_to_text") or "без текста"))
+        return (
+            f'<a class="reply" href="#message-{reply_to_message_id}">'
+            '<span class="reply-line"></span>'
+            '<span>'
+            f'<strong>Ответ на {sender}</strong>'
+            f'<em>{text}</em>'
+            "</span>"
+            "</a>"
         )
 
     def _attachment_html(self, attachment: dict[str, Any]) -> str:
@@ -527,18 +611,36 @@ def _chat_name(message: dict[str, Any]) -> str:
 
 
 def _sender_name(message: dict[str, Any]) -> str:
+    return _message_sender_name(
+        {
+            "first_name": message.get("from_first_name"),
+            "last_name": message.get("from_last_name"),
+            "username": message.get("from_username"),
+            "id": message.get("from_user_id"),
+        }
+    )
+
+
+def _message_sender_name(sender: dict[str, Any]) -> str:
     parts = [
-        str(message.get("from_first_name") or "").strip(),
-        str(message.get("from_last_name") or "").strip(),
+        str(sender.get("first_name") or "").strip(),
+        str(sender.get("last_name") or "").strip(),
     ]
     name = " ".join(part for part in parts if part)
     if name:
         return name
-    if message.get("from_username"):
-        return f"@{message['from_username']}"
-    if message.get("from_user_id"):
-        return str(message["from_user_id"])
+    if sender.get("username"):
+        return f"@{sender['username']}"
+    if sender.get("id"):
+        return str(sender["id"])
     return "Unknown"
+
+
+def _reply_media_label(message: dict[str, Any]) -> str:
+    message_type = detect_message_type(message)
+    if message_type == "unknown":
+        return ""
+    return f"[{message_type}]"
 
 
 def _format_telegram_time(value: Any) -> str:
