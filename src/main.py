@@ -246,7 +246,20 @@ class TelegramBusinessVoiceTranscriberApp:
 
             for update in updates:
                 offset = update["update_id"] + 1
-                await self._dispatch_update(update)
+                try:
+                    await self._dispatch_update(update)
+                except TelegramApiError as exc:
+                    if exc.retry_after:
+                        logger.warning(
+                            "Telegram flood wait while handling update=%s: sleeping %s seconds",
+                            update["update_id"],
+                            exc.retry_after,
+                        )
+                        await asyncio.sleep(exc.retry_after)
+                    else:
+                        logger.exception("Telegram API failed while handling update=%s", update["update_id"])
+                except Exception:
+                    logger.exception("Failed to handle update=%s", update["update_id"])
 
     async def _dispatch_update(self, update: dict[str, Any]) -> None:
         if callback_query := update.get("callback_query"):
@@ -271,6 +284,7 @@ class TelegramBusinessVoiceTranscriberApp:
         chat_id = int(chat["id"])
         sender_id = int((message.get("from") or {}).get("id", chat_id))
         text = (message.get("text") or "").strip()
+        logger.info("Received private bot message chat=%s from=%s text=%s", chat_id, sender_id, text[:40])
 
         if not self._is_admin(sender_id):
             await self._telegram.send_message(
@@ -454,6 +468,10 @@ class TelegramBusinessVoiceTranscriberApp:
 
     async def _send_export(self, chat_id: int) -> None:
         try:
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text="Готовлю архив. Если сообщений и вложений много, это может занять немного времени.",
+            )
             archive_path = await asyncio.to_thread(self._storage.create_export_zip)
             await self._telegram.send_document(
                 chat_id=chat_id,
