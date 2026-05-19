@@ -4,6 +4,8 @@ import asyncio
 import logging
 import re
 import signal
+import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -329,8 +331,12 @@ class TelegramBusinessVoiceTranscriberApp:
             await self._telegram.answer_callback_query(callback_id)
             await self._edit_stats(chat_id, message_id)
         elif data == "menu:export":
+            await self._telegram.answer_callback_query(callback_id)
+            await self._edit_export_periods(chat_id, message_id)
+        elif data.startswith("export:"):
+            period_name, since_timestamp = self._export_period(data)
             await self._telegram.answer_callback_query(callback_id, "Готовлю архив")
-            await self._send_export(chat_id)
+            await self._send_export(chat_id, period_name, since_timestamp)
         elif data == "toggle:storage":
             self._toggle_bool(SETTING_STORAGE_ENABLED, True)
             await self._telegram.answer_callback_query(callback_id, "Готово")
@@ -466,17 +472,34 @@ class TelegramBusinessVoiceTranscriberApp:
             reply_markup=self._main_keyboard(),
         )
 
-    async def _send_export(self, chat_id: int) -> None:
+    async def _edit_export_periods(self, chat_id: int, message_id: int) -> None:
+        await self._telegram.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="Выберите период для выгрузки. В архиве будет HTML-страница с вкладками по чатам и встроенным просмотром вложений.",
+            reply_markup=self._export_keyboard(),
+        )
+
+    async def _send_export(
+        self,
+        chat_id: int,
+        period_name: str = "все время",
+        since_timestamp: int | None = None,
+    ) -> None:
         try:
             await self._telegram.send_message(
                 chat_id=chat_id,
-                text="Готовлю архив. Если сообщений и вложений много, это может занять немного времени.",
+                text=f"Готовлю архив за период: {period_name}. Если сообщений и вложений много, это может занять немного времени.",
             )
-            archive_path = await asyncio.to_thread(self._storage.create_export_zip)
+            archive_path = await asyncio.to_thread(
+                self._storage.create_export_zip,
+                period_name=period_name,
+                since_timestamp=since_timestamp,
+            )
             await self._telegram.send_document(
                 chat_id=chat_id,
                 path=archive_path,
-                caption="Архив сообщений: SQLite, CSV, JSONL и вложения.",
+                caption="Архив сообщений: откройте index.html внутри ZIP для удобного просмотра.",
             )
         except Exception:
             logger.exception("Failed to create or send export")
@@ -529,6 +552,22 @@ class TelegramBusinessVoiceTranscriberApp:
             ]
         }
 
+    @staticmethod
+    def _export_keyboard() -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "24 часа", "callback_data": "export:1d"},
+                    {"text": "7 дней", "callback_data": "export:7d"},
+                ],
+                [
+                    {"text": "30 дней", "callback_data": "export:30d"},
+                    {"text": "Все время", "callback_data": "export:all"},
+                ],
+                [{"text": "Назад", "callback_data": "menu:main"}],
+            ]
+        }
+
     def _settings_keyboard(self) -> dict[str, Any]:
         return {
             "inline_keyboard": [
@@ -568,6 +607,16 @@ class TelegramBusinessVoiceTranscriberApp:
 
     def _is_admin(self, user_id: int) -> bool:
         return user_id in self._settings.admin_user_ids
+
+    @staticmethod
+    def _export_period(data: str) -> tuple[str, int | None]:
+        now = int(time.time())
+        periods = {
+            "export:1d": ("последние 24 часа", now - int(timedelta(days=1).total_seconds())),
+            "export:7d": ("последние 7 дней", now - int(timedelta(days=7).total_seconds())),
+            "export:30d": ("последние 30 дней", now - int(timedelta(days=30).total_seconds())),
+        }
+        return periods.get(data, ("все время", None))
 
     @staticmethod
     def _find_voice_path(attachments: list[dict[str, Any]]) -> Path | None:

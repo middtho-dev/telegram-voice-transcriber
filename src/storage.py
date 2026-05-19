@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import html
 import json
 import shutil
 import sqlite3
@@ -213,7 +214,12 @@ class MessageStorage:
             "chats": int(chats["count"]),
         }
 
-    def create_export_zip(self) -> Path:
+    def create_export_zip(
+        self,
+        *,
+        period_name: str = "all",
+        since_timestamp: int | None = None,
+    ) -> Path:
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         export_dir = self.exports_dir / f"export_{timestamp}"
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -221,9 +227,11 @@ class MessageStorage:
         db_copy = export_dir / "messages.sqlite3"
         self._backup_database(db_copy)
 
-        rows = self._message_rows()
+        rows = self._message_rows(since_timestamp)
+        attachments = self._attachment_rows(since_timestamp)
         self._write_csv(export_dir / "messages.csv", rows)
         self._write_jsonl(export_dir / "messages.jsonl", rows)
+        self._write_html(export_dir / "index.html", rows, attachments, period_name)
 
         archive_path = self.exports_dir / f"telegram_business_messages_{timestamp}.zip"
         with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -241,18 +249,50 @@ class MessageStorage:
             with sqlite3.connect(target) as destination:
                 source.backup(destination)
 
-    def _message_rows(self) -> list[dict[str, Any]]:
+    def _message_rows(self, since_timestamp: int | None = None) -> list[dict[str, Any]]:
+        where = ""
+        params: tuple[Any, ...] = ()
+        if since_timestamp is not None:
+            where = "WHERE m.date >= ?"
+            params = (since_timestamp,)
+
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT
                     m.*,
                     GROUP_CONCAT(a.local_path, '; ') AS attachment_paths
                 FROM messages m
                 LEFT JOIN attachments a ON a.message_db_id = m.id
+                {where}
                 GROUP BY m.id
                 ORDER BY m.date ASC, m.id ASC
-                """
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _attachment_rows(self, since_timestamp: int | None = None) -> list[dict[str, Any]]:
+        where = ""
+        params: tuple[Any, ...] = ()
+        if since_timestamp is not None:
+            where = "WHERE m.date >= ?"
+            params = (since_timestamp,)
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    a.*,
+                    m.chat_id,
+                    m.message_id,
+                    m.date
+                FROM attachments a
+                JOIN messages m ON m.id = a.message_db_id
+                {where}
+                ORDER BY m.date ASC, m.id ASC, a.id ASC
+                """,
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -272,6 +312,242 @@ class MessageStorage:
         with path.open("w", encoding="utf-8") as file:
             for row in rows:
                 file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def _write_html(
+        self,
+        path: Path,
+        rows: list[dict[str, Any]],
+        attachments: list[dict[str, Any]],
+        period_name: str,
+    ) -> None:
+        attachments_by_message: dict[int, list[dict[str, Any]]] = {}
+        for attachment in attachments:
+            attachments_by_message.setdefault(int(attachment["message_db_id"]), []).append(attachment)
+
+        chats: dict[int, list[dict[str, Any]]] = {}
+        for row in rows:
+            chats.setdefault(int(row["chat_id"]), []).append(row)
+
+        chat_tabs: list[str] = []
+        chat_sections: list[str] = []
+        for index, (chat_id, messages) in enumerate(chats.items()):
+            chat_name = _chat_name(messages[0])
+            active_class = " active" if index == 0 else ""
+            section_id = f"chat-{chat_id}"
+            chat_tabs.append(
+                f'<button class="tab{active_class}" data-chat="{section_id}">'
+                f"{html.escape(chat_name)} <span>{len(messages)}</span></button>"
+            )
+            chat_sections.append(
+                f'<section id="{section_id}" class="chat{active_class}">'
+                f"<h2>{html.escape(chat_name)}</h2>"
+                f"{''.join(self._message_html(message, attachments_by_message.get(int(message['id']), [])) for message in messages)}"
+                "</section>"
+            )
+
+        if not rows:
+            chat_sections.append('<section class="chat active"><h2>Нет сообщений за выбранный период</h2></section>')
+
+        document = f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telegram Business Archive</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --text: #17212b;
+      --muted: #64748b;
+      --line: #d8dee8;
+      --accent: #168acd;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font: 15px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }}
+    header {{
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      padding: 18px 22px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+    }}
+    h1, h2, p {{ margin: 0; }}
+    header p {{ color: var(--muted); margin-top: 4px; }}
+    .layout {{
+      display: grid;
+      grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+      min-height: calc(100vh - 77px);
+    }}
+    nav {{
+      border-right: 1px solid var(--line);
+      padding: 14px;
+      background: #eef2f6;
+      overflow: auto;
+    }}
+    .tab {{
+      width: 100%;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      margin-bottom: 6px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text);
+      text-align: left;
+      cursor: pointer;
+    }}
+    .tab.active {{
+      background: var(--panel);
+      border-color: var(--line);
+      color: var(--accent);
+    }}
+    main {{ padding: 20px; overflow: auto; }}
+    .chat {{ display: none; max-width: 980px; margin: 0 auto; }}
+    .chat.active {{ display: block; }}
+    .chat h2 {{ margin-bottom: 16px; font-size: 22px; }}
+    .message {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }}
+    .meta {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 8px;
+    }}
+    .content {{ white-space: pre-wrap; overflow-wrap: anywhere; }}
+    .attachments {{ display: grid; gap: 10px; margin-top: 12px; }}
+    .attachment {{
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f8fafc;
+    }}
+    audio, video, img {{ width: 100%; max-width: 720px; display: block; }}
+    img {{ height: auto; border-radius: 6px; }}
+    a {{ color: var(--accent); }}
+    @media (max-width: 760px) {{
+      .layout {{ grid-template-columns: 1fr; }}
+      nav {{ border-right: 0; border-bottom: 1px solid var(--line); max-height: 220px; }}
+      main {{ padding: 14px; }}
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Telegram Business Archive</h1>
+    <p>Период: {html.escape(period_name)}. Сообщений: {len(rows)}. Сформировано: {html.escape(datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"))}</p>
+  </header>
+  <div class="layout">
+    <nav>{''.join(chat_tabs)}</nav>
+    <main>{''.join(chat_sections)}</main>
+  </div>
+  <script>
+    document.querySelectorAll('.tab').forEach((tab) => {{
+      tab.addEventListener('click', () => {{
+        document.querySelectorAll('.tab').forEach((item) => item.classList.remove('active'));
+        document.querySelectorAll('.chat').forEach((item) => item.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(tab.dataset.chat).classList.add('active');
+      }});
+    }});
+  </script>
+</body>
+</html>
+"""
+        path.write_text(document, encoding="utf-8")
+
+    def _message_html(self, message: dict[str, Any], attachments: list[dict[str, Any]]) -> str:
+        sender = _sender_name(message)
+        message_time = _format_telegram_time(message.get("date"))
+        body = message.get("text") or message.get("caption") or ""
+        if not body and message["message_type"] != "unknown":
+            body = f"[{message['message_type']}]"
+
+        attachment_html = "".join(self._attachment_html(attachment) for attachment in attachments)
+        return (
+            '<article class="message">'
+            f'<div class="meta"><span>{html.escape(sender)}</span><span>{html.escape(message_time)}</span></div>'
+            f'<div class="content">{html.escape(str(body))}</div>'
+            f'<div class="attachments">{attachment_html}</div>'
+            "</article>"
+        )
+
+    def _attachment_html(self, attachment: dict[str, Any]) -> str:
+        local_path = Path(str(attachment["local_path"]))
+        try:
+            relative = Path("attachments") / local_path.relative_to(self.attachments_dir)
+        except ValueError:
+            relative = Path("attachments") / local_path.name
+
+        href = html.escape(relative.as_posix())
+        kind = str(attachment["file_kind"])
+        name = html.escape(str(attachment.get("file_name") or local_path.name))
+
+        if kind in {"voice", "audio"}:
+            media = f'<audio controls preload="metadata" src="{href}"></audio>'
+        elif kind in {"video", "video_note", "animation"}:
+            media = f'<video controls preload="metadata" src="{href}"></video>'
+        elif kind in {"photo", "sticker"}:
+            media = f'<img src="{href}" alt="{name}">'
+        else:
+            media = ""
+
+        return (
+            '<div class="attachment">'
+            f"<strong>{html.escape(kind)}</strong>: "
+            f'<a href="{href}" download>{name}</a>'
+            f"{media}"
+            "</div>"
+        )
+
+
+def _chat_name(message: dict[str, Any]) -> str:
+    if message.get("chat_title"):
+        return str(message["chat_title"])
+    sender = _sender_name(message)
+    if sender != "Unknown":
+        return sender
+    return f"Chat {message['chat_id']}"
+
+
+def _sender_name(message: dict[str, Any]) -> str:
+    parts = [
+        str(message.get("from_first_name") or "").strip(),
+        str(message.get("from_last_name") or "").strip(),
+    ]
+    name = " ".join(part for part in parts if part)
+    if name:
+        return name
+    if message.get("from_username"):
+        return f"@{message['from_username']}"
+    if message.get("from_user_id"):
+        return str(message["from_user_id"])
+    return "Unknown"
+
+
+def _format_telegram_time(value: Any) -> str:
+    if not value:
+        return ""
+    try:
+        return datetime.fromtimestamp(int(value), UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except (TypeError, ValueError, OSError):
+        return str(value)
 
 
 def detect_message_type(message: dict[str, Any]) -> str:
