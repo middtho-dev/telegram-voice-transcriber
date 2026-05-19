@@ -254,13 +254,85 @@ class MessageStorage:
             attachments = connection.execute("SELECT COUNT(*) AS count FROM attachments").fetchone()
             chats = connection.execute("SELECT COUNT(DISTINCT chat_id) AS count FROM messages").fetchone()
             learned = connection.execute("SELECT COUNT(*) AS count FROM learned_replies").fetchone()
+            voice = connection.execute("SELECT COUNT(*) AS count FROM messages WHERE message_type = 'voice'").fetchone()
 
         return {
             "messages": int(messages["count"]),
             "attachments": int(attachments["count"]),
             "chats": int(chats["count"]),
             "learned_replies": int(learned["count"]),
+            "voice_messages": int(voice["count"]),
         }
+
+    def maintenance_stats(self) -> dict[str, int]:
+        return {
+            "database_bytes": self.database_path.stat().st_size if self.database_path.exists() else 0,
+            "attachments_bytes": _directory_size(self.attachments_dir),
+            "exports_bytes": _directory_size(self.exports_dir),
+            "export_files": len([path for path in self.exports_dir.glob("*.zip") if path.is_file()]),
+        }
+
+    def top_chats(self, limit: int = 5) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    chat_id,
+                    COALESCE(chat_title, from_first_name, from_username, chat_id) AS chat_name,
+                    COUNT(*) AS messages,
+                    SUM(CASE WHEN message_type = 'voice' THEN 1 ELSE 0 END) AS voice_messages
+                FROM messages
+                GROUP BY chat_id
+                ORDER BY messages DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def cleanup_attachments(self, older_than_timestamp: int | None = None) -> dict[str, int]:
+        where = ""
+        params: tuple[Any, ...] = ()
+        if older_than_timestamp is not None:
+            where = "WHERE m.date < ?"
+            params = (older_than_timestamp,)
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT a.id, a.local_path
+                FROM attachments a
+                JOIN messages m ON m.id = a.message_db_id
+                {where}
+                """,
+                params,
+            ).fetchall()
+            attachment_ids = [int(row["id"]) for row in rows]
+            removed = _delete_paths([Path(str(row["local_path"])) for row in rows])
+
+            if attachment_ids:
+                placeholders = ",".join("?" for _ in attachment_ids)
+                connection.execute(
+                    f"DELETE FROM attachments WHERE id IN ({placeholders})",
+                    attachment_ids,
+                )
+
+        return {"files": removed["files"], "bytes": removed["bytes"]}
+
+    def cleanup_exports(self, older_than_timestamp: int | None = None) -> dict[str, int]:
+        paths = []
+        for path in self.exports_dir.glob("*.zip"):
+            if not path.is_file():
+                continue
+            if older_than_timestamp is None or int(path.stat().st_mtime) < older_than_timestamp:
+                paths.append(path)
+        return _delete_paths(paths)
+
+    def clear_learned_replies(self) -> int:
+        with self._connect() as connection:
+            count = connection.execute("SELECT COUNT(*) AS count FROM learned_replies").fetchone()
+            connection.execute("DELETE FROM learned_replies")
+        return int(count["count"])
 
     def learn_support_reply(
         self,
@@ -358,8 +430,11 @@ class MessageStorage:
 
         rows = self._message_rows(since_timestamp)
         attachments = self._attachment_rows(since_timestamp)
+        learned_replies = self._learned_reply_rows()
         self._write_csv(export_dir / "messages.csv", rows)
         self._write_jsonl(export_dir / "messages.jsonl", rows)
+        self._write_csv(export_dir / "learned_replies.csv", learned_replies)
+        self._write_jsonl(export_dir / "learned_replies.jsonl", learned_replies)
         self._write_html(export_dir / "index.html", rows, attachments, period_name)
 
         archive_path = self.exports_dir / f"telegram_business_messages_{timestamp}.zip"
@@ -422,6 +497,17 @@ class MessageStorage:
                 ORDER BY m.date ASC, m.id ASC, a.id ASC
                 """,
                 params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _learned_reply_rows(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM learned_replies
+                ORDER BY updated_at DESC
+                """
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -767,6 +853,27 @@ def _token_overlap_score(left: str, right: str) -> float:
     if not left_tokens or not right_tokens:
         return 0.0
     return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def _directory_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def _delete_paths(paths: list[Path]) -> dict[str, int]:
+    removed_files = 0
+    removed_bytes = 0
+    for path in paths:
+        try:
+            if not path.exists() or not path.is_file():
+                continue
+            removed_bytes += path.stat().st_size
+            path.unlink()
+            removed_files += 1
+        except OSError:
+            continue
+    return {"files": removed_files, "bytes": removed_bytes}
 
 
 def _format_telegram_time(value: Any) -> str:
