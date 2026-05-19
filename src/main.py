@@ -29,6 +29,9 @@ SETTING_TRANSCRIPTION_ENABLED = "transcription_enabled"
 SETTING_REPLY_TO_VOICE = "reply_to_voice"
 SETTING_VPN_SUPPORT_ENABLED = "vpn_support_enabled"
 SETTING_SUPPORT_LEARNING_ENABLED = "support_learning_enabled"
+SETTING_SUPPORT_SERVICE_NAME = "support_service_name"
+SETTING_SUPPORT_CONTACT = "support_contact"
+SETTING_PENDING_ADMIN_ACTION = "pending_admin_action"
 
 
 class TelegramApiError(RuntimeError):
@@ -306,6 +309,8 @@ class TelegramBusinessVoiceTranscriberApp:
             await self._send_menu(chat_id)
         elif text.startswith("/export"):
             await self._send_export(chat_id)
+        elif await self._handle_pending_admin_input(chat_id, text):
+            return
         else:
             await self._telegram.send_message(
                 chat_id=chat_id,
@@ -333,6 +338,22 @@ class TelegramBusinessVoiceTranscriberApp:
             await self._edit_archive(chat_id, message_id)
         elif data == "menu:support":
             await self._telegram.answer_callback_query(callback_id)
+            await self._edit_support(chat_id, message_id)
+        elif data == "support:edit_service_name":
+            self._storage.set_value(SETTING_PENDING_ADMIN_ACTION, "edit_service_name")
+            await self._telegram.answer_callback_query(callback_id)
+            await self._telegram.send_message(chat_id=chat_id, text="✏️ Напишите новое название VPN-сервиса одним сообщением.")
+        elif data == "support:edit_contact":
+            self._storage.set_value(SETTING_PENDING_ADMIN_ACTION, "edit_contact")
+            await self._telegram.answer_callback_query(callback_id)
+            await self._telegram.send_message(chat_id=chat_id, text="✏️ Напишите контакт поддержки: username, ссылку или короткий текст.")
+        elif data == "support:analyze":
+            await self._telegram.answer_callback_query(callback_id, "Анализирую")
+            result = await asyncio.to_thread(self._storage.analyze_support_knowledge, self._settings.admin_user_ids)
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text=f"🧠 Анализ завершён.\nПросканировано сообщений: {result['scanned']}\nДобавлено/обновлено знаний: {result['learned']}",
+            )
             await self._edit_support(chat_id, message_id)
         elif data == "menu:maintenance":
             await self._telegram.answer_callback_query(callback_id)
@@ -375,6 +396,12 @@ class TelegramBusinessVoiceTranscriberApp:
             self._toggle_bool(SETTING_SUPPORT_LEARNING_ENABLED, False)
             await self._telegram.answer_callback_query(callback_id, "Готово")
             await self._edit_support(chat_id, message_id)
+            if self._support_learning_enabled():
+                result = await asyncio.to_thread(self._storage.analyze_support_knowledge, self._settings.admin_user_ids)
+                await self._telegram.send_message(
+                    chat_id=chat_id,
+                    text=f"🧠 Обучение включено. Уже проанализировал архив.\nПросканировано: {result['scanned']}\nДобавлено/обновлено: {result['learned']}",
+                )
         else:
             await self._telegram.answer_callback_query(callback_id)
 
@@ -440,8 +467,8 @@ class TelegramBusinessVoiceTranscriberApp:
         if reply is None:
             reply = generate_vpn_support_reply(
                 text,
-                service_name=self._settings.support_service_name,
-                support_contact=self._settings.support_contact,
+                service_name=self._support_service_name(),
+                support_contact=self._support_contact(),
             )
         if not reply:
             return
@@ -484,6 +511,33 @@ class TelegramBusinessVoiceTranscriberApp:
                 message["chat"]["id"],
                 message["message_id"],
             )
+
+    async def _handle_pending_admin_input(self, chat_id: int, text: str) -> bool:
+        action = self._storage.get_value(SETTING_PENDING_ADMIN_ACTION)
+        if not action:
+            return False
+
+        value = text.strip()
+        if not value:
+            await self._telegram.send_message(chat_id=chat_id, text="Пустое значение не сохранено.")
+            return True
+
+        if action == "edit_service_name":
+            self._storage.set_value(SETTING_SUPPORT_SERVICE_NAME, value[:80])
+            self._storage.set_value(SETTING_PENDING_ADMIN_ACTION, "")
+            await self._telegram.send_message(chat_id=chat_id, text=f"✅ Название сервиса сохранено: {value[:80]}")
+            await self._send_menu(chat_id)
+            return True
+
+        if action == "edit_contact":
+            self._storage.set_value(SETTING_SUPPORT_CONTACT, value[:120])
+            self._storage.set_value(SETTING_PENDING_ADMIN_ACTION, "")
+            await self._telegram.send_message(chat_id=chat_id, text=f"✅ Контакт поддержки сохранён: {value[:120]}")
+            await self._send_menu(chat_id)
+            return True
+
+        self._storage.set_value(SETTING_PENDING_ADMIN_ACTION, "")
+        return False
 
     async def _download_attachments(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         saved: list[dict[str, Any]] = []
@@ -651,35 +705,35 @@ class TelegramBusinessVoiceTranscriberApp:
         stats = self._storage.stats()
         maintenance = self._storage.maintenance_stats()
         return (
-            "Центр управления\n\n"
-            f"Сообщений в базе: {stats['messages']}\n"
-            f"Голосовых: {stats['voice_messages']}\n"
-            f"Вложений: {stats['attachments']}\n"
-            f"Чатов: {stats['chats']}\n"
-            f"Выученных ответов: {stats['learned_replies']}\n"
-            f"Размер вложений: {_human_bytes(maintenance['attachments_bytes'])}\n\n"
-            "Выберите раздел."
+            "🧭 Центр управления\n\n"
+            f"💬 Сообщений: {stats['messages']}\n"
+            f"🎙 Голосовых: {stats['voice_messages']}\n"
+            f"📎 Вложений: {stats['attachments']}\n"
+            f"👥 Чатов: {stats['chats']}\n"
+            f"🧠 Выученных ответов: {stats['learned_replies']}\n"
+            f"💾 Вложения занимают: {_human_bytes(maintenance['attachments_bytes'])}\n\n"
+            "Выберите раздел ниже."
         )
 
     def _settings_text(self) -> str:
         return (
-            "Настройки\n\n"
-            f"Сохранять сообщения: {self._state_text(self._storage_enabled())}\n"
-            f"Расшифровывать голосовые: {self._state_text(self._transcription_enabled())}\n"
-            f"Отвечать реплаем: {self._state_text(self._reply_to_voice())}\n\n"
-            f"Модель: {self._settings.whisper_model}\n"
-            f"Язык: {self._settings.whisper_language or 'auto'}"
+            "⚙️ Настройки\n\n"
+            f"🗄 Сохранять сообщения: {self._state_text(self._storage_enabled())}\n"
+            f"🎙 Расшифровывать голосовые: {self._state_text(self._transcription_enabled())}\n"
+            f"↩️ Отвечать реплаем: {self._state_text(self._reply_to_voice())}\n\n"
+            f"🤖 Модель: {self._settings.whisper_model}\n"
+            f"🌐 Язык: {self._settings.whisper_language or 'auto'}"
         )
 
     def _stats_text(self) -> str:
         stats = self._storage.stats()
         return (
-            "Статистика архива\n\n"
-            f"Сообщений: {stats['messages']}\n"
-            f"Голосовых: {stats['voice_messages']}\n"
-            f"Вложений: {stats['attachments']}\n"
-            f"Чатов: {stats['chats']}\n"
-            f"Выученных ответов: {stats['learned_replies']}\n\n"
+            "📊 Статистика\n\n"
+            f"💬 Сообщений: {stats['messages']}\n"
+            f"🎙 Голосовых: {stats['voice_messages']}\n"
+            f"📎 Вложений: {stats['attachments']}\n"
+            f"👥 Чатов: {stats['chats']}\n"
+            f"🧠 Выученных ответов: {stats['learned_replies']}\n\n"
             f"{self._top_chats_text()}"
         )
 
@@ -688,14 +742,14 @@ class TelegramBusinessVoiceTranscriberApp:
         return {
             "inline_keyboard": [
                 [
-                    {"text": "Архив", "callback_data": "menu:archive"},
-                    {"text": "Поддержка", "callback_data": "menu:support"},
+                    {"text": "🗄 Архив", "callback_data": "menu:archive"},
+                    {"text": "🛟 Поддержка", "callback_data": "menu:support"},
                 ],
                 [
-                    {"text": "Обслуживание", "callback_data": "menu:maintenance"},
-                    {"text": "Статистика", "callback_data": "menu:stats"},
+                    {"text": "🧹 Обслуживание", "callback_data": "menu:maintenance"},
+                    {"text": "📊 Статистика", "callback_data": "menu:stats"},
                 ],
-                [{"text": "Настройки", "callback_data": "menu:settings"}],
+                [{"text": "⚙️ Настройки", "callback_data": "menu:settings"}],
             ]
         }
 
@@ -703,13 +757,13 @@ class TelegramBusinessVoiceTranscriberApp:
         stats = self._storage.stats()
         maintenance = self._storage.maintenance_stats()
         return (
-            "Архив сообщений\n\n"
-            f"Сообщений: {stats['messages']}\n"
-            f"Вложений: {stats['attachments']}\n"
-            f"Чатов: {stats['chats']}\n"
-            f"База: {_human_bytes(maintenance['database_bytes'])}\n"
-            f"Вложения: {_human_bytes(maintenance['attachments_bytes'])}\n"
-            f"ZIP-выгрузки: {maintenance['export_files']} файлов, {_human_bytes(maintenance['exports_bytes'])}\n\n"
+            "🗄 Архив сообщений\n\n"
+            f"💬 Сообщений: {stats['messages']}\n"
+            f"📎 Вложений: {stats['attachments']}\n"
+            f"👥 Чатов: {stats['chats']}\n"
+            f"🧱 База: {_human_bytes(maintenance['database_bytes'])}\n"
+            f"💾 Вложения: {_human_bytes(maintenance['attachments_bytes'])}\n"
+            f"📦 ZIP-выгрузки: {maintenance['export_files']} файлов, {_human_bytes(maintenance['exports_bytes'])}\n\n"
             "Можно выгрузить HTML-архив за нужный период или перейти к очистке."
         )
 
@@ -717,22 +771,22 @@ class TelegramBusinessVoiceTranscriberApp:
     def _archive_keyboard() -> dict[str, Any]:
         return {
             "inline_keyboard": [
-                [{"text": "Выгрузить архив", "callback_data": "menu:export"}],
-                [{"text": "Очистка и место", "callback_data": "menu:maintenance"}],
-                [{"text": "Назад", "callback_data": "menu:main"}],
+                [{"text": "📦 Выгрузить архив", "callback_data": "menu:export"}],
+                [{"text": "🧹 Очистка и место", "callback_data": "menu:maintenance"}],
+                [{"text": "⬅️ Назад", "callback_data": "menu:main"}],
             ]
         }
 
     def _support_text(self) -> str:
         stats = self._storage.stats()
         return (
-            "Поддержка VPN\n\n"
-            f"Автоответы: {self._state_text(self._vpn_support_enabled())}\n"
-            f"Обучение на ваших ответах: {self._state_text(self._support_learning_enabled())}\n"
-            f"Выученных ответов: {stats['learned_replies']}\n\n"
-            f"Название сервиса: {self._settings.support_service_name}\n"
-            f"Контакт: {self._settings.support_contact}\n\n"
-            "Обучение работает так: клиент задает вопрос, вы отвечаете на него реплаем, бот запоминает пару вопрос-ответ."
+            "🛟 Поддержка VPN\n\n"
+            f"🤖 Автоответы: {self._state_text(self._vpn_support_enabled())}\n"
+            f"🧠 Обучение на переписке: {self._state_text(self._support_learning_enabled())}\n"
+            f"📚 Выученных ответов: {stats['learned_replies']}\n\n"
+            f"🏷 Название сервиса: {self._support_service_name()}\n"
+            f"☎️ Контакт: {self._support_contact()}\n\n"
+            "Когда обучение включено, бот анализирует всю сохранённую переписку: ваши ручные ответы реплаем, последовательности клиент->оператор и типовые инструкции оператора."
         )
 
     def _support_keyboard(self) -> dict[str, Any]:
@@ -740,28 +794,33 @@ class TelegramBusinessVoiceTranscriberApp:
             "inline_keyboard": [
                 [
                     {
-                        "text": f"VPN-поддержка: {self._state_text(self._vpn_support_enabled())}",
+                        "text": f"🤖 VPN-поддержка: {self._state_text(self._vpn_support_enabled())}",
                         "callback_data": "toggle:vpn_support",
                     }
                 ],
                 [
                     {
-                        "text": f"Обучение: {self._state_text(self._support_learning_enabled())}",
+                        "text": f"🧠 Обучение: {self._state_text(self._support_learning_enabled())}",
                         "callback_data": "toggle:support_learning",
                     }
                 ],
-                [{"text": "Сбросить обучение", "callback_data": "cleanup:learned:all"}],
-                [{"text": "Назад", "callback_data": "menu:main"}],
+                [{"text": "🔎 Анализировать переписку", "callback_data": "support:analyze"}],
+                [
+                    {"text": "✏️ Название", "callback_data": "support:edit_service_name"},
+                    {"text": "☎️ Контакт", "callback_data": "support:edit_contact"},
+                ],
+                [{"text": "🧯 Сбросить обучение", "callback_data": "cleanup:learned:all"}],
+                [{"text": "⬅️ Назад", "callback_data": "menu:main"}],
             ]
         }
 
     def _maintenance_text(self) -> str:
         maintenance = self._storage.maintenance_stats()
         return (
-            "Обслуживание\n\n"
-            f"База: {_human_bytes(maintenance['database_bytes'])}\n"
-            f"Вложения: {_human_bytes(maintenance['attachments_bytes'])}\n"
-            f"ZIP-выгрузки: {maintenance['export_files']} файлов, {_human_bytes(maintenance['exports_bytes'])}\n\n"
+            "🧹 Обслуживание\n\n"
+            f"🧱 База: {_human_bytes(maintenance['database_bytes'])}\n"
+            f"📎 Вложения: {_human_bytes(maintenance['attachments_bytes'])}\n"
+            f"📦 ZIP-выгрузки: {maintenance['export_files']} файлов, {_human_bytes(maintenance['exports_bytes'])}\n\n"
             "Очистка удаляет файлы вложений и ZIP-выгрузки, но не удаляет сами сообщения из базы."
         )
 
@@ -769,12 +828,12 @@ class TelegramBusinessVoiceTranscriberApp:
     def _maintenance_keyboard() -> dict[str, Any]:
         return {
             "inline_keyboard": [
-                [{"text": "Удалить вложения старше 30 дней", "callback_data": "cleanup:attachments:30d"}],
-                [{"text": "Удалить вложения старше 90 дней", "callback_data": "cleanup:attachments:90d"}],
-                [{"text": "Удалить все вложения", "callback_data": "cleanup:attachments:all"}],
-                [{"text": "Удалить старые ZIP", "callback_data": "cleanup:exports:30d"}],
-                [{"text": "Удалить все ZIP", "callback_data": "cleanup:exports:all"}],
-                [{"text": "Назад", "callback_data": "menu:main"}],
+                [{"text": "📎 Вложения старше 30 дней", "callback_data": "cleanup:attachments:30d"}],
+                [{"text": "📎 Вложения старше 90 дней", "callback_data": "cleanup:attachments:90d"}],
+                [{"text": "🧨 Все вложения", "callback_data": "cleanup:attachments:all"}],
+                [{"text": "📦 ZIP старше 30 дней", "callback_data": "cleanup:exports:30d"}],
+                [{"text": "🗑 Все ZIP", "callback_data": "cleanup:exports:all"}],
+                [{"text": "⬅️ Назад", "callback_data": "menu:main"}],
             ]
         }
 
@@ -799,23 +858,23 @@ class TelegramBusinessVoiceTranscriberApp:
             "inline_keyboard": [
                 [
                     {
-                        "text": f"Хранение: {self._state_text(self._storage_enabled())}",
+                        "text": f"🗄 Хранение: {self._state_text(self._storage_enabled())}",
                         "callback_data": "toggle:storage",
                     }
                 ],
                 [
                     {
-                        "text": f"Расшифровка: {self._state_text(self._transcription_enabled())}",
+                        "text": f"🎙 Расшифровка: {self._state_text(self._transcription_enabled())}",
                         "callback_data": "toggle:transcription",
                     }
                 ],
                 [
                     {
-                        "text": f"Реплай: {self._state_text(self._reply_to_voice())}",
+                        "text": f"↩️ Реплай: {self._state_text(self._reply_to_voice())}",
                         "callback_data": "toggle:reply",
                     }
                 ],
-                [{"text": "Назад", "callback_data": "menu:main"}],
+                [{"text": "⬅️ Назад", "callback_data": "menu:main"}],
             ]
         }
 
@@ -886,6 +945,12 @@ class TelegramBusinessVoiceTranscriberApp:
 
     def _support_learning_enabled(self) -> bool:
         return self._storage.get_bool(SETTING_SUPPORT_LEARNING_ENABLED, False)
+
+    def _support_service_name(self) -> str:
+        return self._storage.get_value(SETTING_SUPPORT_SERVICE_NAME) or self._settings.support_service_name
+
+    def _support_contact(self) -> str:
+        return self._storage.get_value(SETTING_SUPPORT_CONTACT) or self._settings.support_contact
 
     def _is_admin(self, user_id: int) -> bool:
         return user_id in self._settings.admin_user_ids

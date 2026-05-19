@@ -95,12 +95,14 @@ class MessageStorage:
                     source_chat_id INTEGER,
                     source_message_id INTEGER,
                     reply_to_message_id INTEGER,
+                    source_type TEXT,
                     hits INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            self._ensure_column(connection, "learned_replies", "source_type", "TEXT")
 
     @staticmethod
     def _ensure_column(
@@ -342,6 +344,7 @@ class MessageStorage:
         source_chat_id: int,
         source_message_id: int,
         reply_to_message_id: int,
+        source_type: str = "reply",
     ) -> bool:
         normalized_question = _normalize_learning_text(question_text)
         answer_text = answer_text.strip()
@@ -359,15 +362,17 @@ class MessageStorage:
                     source_chat_id,
                     source_message_id,
                     reply_to_message_id,
+                    source_type,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(normalized_question) DO UPDATE SET
                     answer_text = excluded.answer_text,
                     source_chat_id = excluded.source_chat_id,
                     source_message_id = excluded.source_message_id,
                     reply_to_message_id = excluded.reply_to_message_id,
+                    source_type = excluded.source_type,
                     hits = learned_replies.hits + 1,
                     updated_at = excluded.updated_at
                 """,
@@ -378,11 +383,69 @@ class MessageStorage:
                     source_chat_id,
                     source_message_id,
                     reply_to_message_id,
+                    source_type,
                     now,
                     now,
                 ),
             )
         return True
+
+    def analyze_support_knowledge(self, admin_user_ids: set[int]) -> dict[str, int]:
+        if not admin_user_ids:
+            return {"learned": 0, "scanned": 0}
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM messages
+                WHERE text IS NOT NULL AND TRIM(text) != ''
+                ORDER BY chat_id ASC, date ASC, id ASC
+                """
+            ).fetchall()
+
+        learned = 0
+        scanned = 0
+        previous_client_text_by_chat: dict[int, str] = {}
+        recent_client_texts_by_chat: dict[int, list[str]] = {}
+        admin_ids = set(admin_user_ids)
+
+        for row in rows:
+            scanned += 1
+            chat_id = int(row["chat_id"])
+            text = str(row["text"] or "").strip()
+            from_user_id = int(row["from_user_id"] or 0)
+            is_admin = from_user_id in admin_ids
+
+            if is_admin:
+                question = str(row["reply_to_text"] or "").strip()
+                source_type = "reply"
+                if not question:
+                    question = previous_client_text_by_chat.get(chat_id, "")
+                    source_type = "sequence"
+                if not question:
+                    question = _infer_question_from_answer(text)
+                    source_type = "admin_note"
+
+                if question and _looks_like_support_answer(text):
+                    if self.learn_support_reply(
+                        question_text=question,
+                        answer_text=text,
+                        source_chat_id=chat_id,
+                        source_message_id=int(row["message_id"]),
+                        reply_to_message_id=int(row["reply_to_message_id"] or 0),
+                        source_type=source_type,
+                    ):
+                        learned += 1
+                continue
+
+            if _looks_like_client_question(text):
+                recent = recent_client_texts_by_chat.setdefault(chat_id, [])
+                recent.append(text)
+                del recent[:-5]
+                previous_client_text_by_chat[chat_id] = text
+
+        return {"learned": learned, "scanned": scanned}
 
     def find_learned_reply(self, text: str, min_score: float = 0.72) -> str | None:
         normalized = _normalize_learning_text(text)
@@ -845,6 +908,79 @@ def _normalize_learning_text(text: str) -> str:
     for source, target in replacements.items():
         normalized = re.sub(rf"\b{source}\b", target, normalized)
     return normalized
+
+
+def _looks_like_client_question(text: str) -> bool:
+    normalized = _normalize_learning_text(text)
+    if "?" in text:
+        return True
+    return any(
+        marker in normalized
+        for marker in (
+            "как",
+            "что",
+            "где",
+            "почему",
+            "можно",
+            "помог",
+            "не работает",
+            "не подключ",
+            "ошибка",
+            "оплат",
+            "продл",
+            "цена",
+            "тариф",
+            "настро",
+            "ключ",
+            "конфиг",
+            "ссылка",
+        )
+    )
+
+
+def _looks_like_support_answer(text: str) -> bool:
+    normalized = _normalize_learning_text(text)
+    if len(normalized) < 12:
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "нужно",
+            "установ",
+            "открой",
+            "нажм",
+            "перейд",
+            "проверь",
+            "пришл",
+            "напиш",
+            "оплат",
+            "подключ",
+            "импорт",
+            "ссылка",
+            "конфиг",
+            "сервер",
+            "перезапуст",
+            "если",
+        )
+    )
+
+
+def _infer_question_from_answer(answer: str) -> str:
+    normalized = _normalize_learning_text(answer)
+    categories = [
+        (("iphone", "ios", "ipad"), "Как настроить VPN на iPhone?"),
+        (("android", "samsung", "xiaomi", "honor", "huawei"), "Как настроить VPN на Android?"),
+        (("windows", "компьютер", "ноут"), "Как настроить VPN на Windows?"),
+        (("macos", "macbook", "мак"), "Как настроить VPN на macOS?"),
+        (("оплат", "продл", "тариф", "цена"), "Как оплатить или продлить VPN?"),
+        (("не работает", "ошибка", "перезапуст", "сервер"), "Что делать, если VPN не работает?"),
+        (("медлен", "скорость", "пинг"), "Что делать, если VPN работает медленно?"),
+        (("ключ", "конфиг", "ссылка", "qr"), "Как получить или импортировать конфиг VPN?"),
+    ]
+    for markers, question in categories:
+        if any(marker in normalized for marker in markers):
+            return question
+    return ""
 
 
 def _token_overlap_score(left: str, right: str) -> float:
