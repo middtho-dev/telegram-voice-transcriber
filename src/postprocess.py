@@ -22,6 +22,45 @@ MILD_PROFANITY_REPLACEMENTS = {
     "пиздец": "капец",
 }
 
+EMOJI_THEMES = (
+    (
+        ("не работает", "ошибка", "проблем", "сломал", "отвалил", "не подключ", "не груз"),
+        ("⚠️", "🔧"),
+    ),
+    (
+        ("оплат", "деньг", "карта", "чек", "цена", "тариф", "продл"),
+        ("💳", "⏳"),
+    ),
+    (
+        ("vpn", "впн", "сервер", "подключ", "ключ", "конфиг", "ссылк"),
+        ("🔐", "🔑"),
+    ),
+    (
+        ("медлен", "скорост", "пинг", "лага", "тормоз"),
+        ("🚀", "📶"),
+    ),
+    (
+        ("iphone", "айфон", "ios", "android", "андроид", "телефон"),
+        ("📱",),
+    ),
+    (
+        ("windows", "виндовс", "macos", "мак", "компьютер", "ноут"),
+        ("💻",),
+    ),
+    (
+        ("спасибо", "благодар", "получилось", "супер", "отлично", "класс"),
+        ("✅", "🙏"),
+    ),
+    (
+        ("привет", "здравств", "добрый день", "доброе утро", "добрый вечер"),
+        ("👋",),
+    ),
+    (
+        ("как", "что", "где", "почему", "когда", "вопрос"),
+        ("❓",),
+    ),
+)
+
 
 def improve_transcript(
     text: str,
@@ -59,6 +98,36 @@ def parse_replacements(value: str) -> dict[str, str]:
         if source and target:
             replacements[source] = target
     return replacements
+
+
+def add_meaningful_emojis(text: str, limit: int = 3) -> str:
+    emojis = _choose_message_emojis(text, limit=limit)
+    if not emojis:
+        return text
+    if any(emoji in text for emoji in emojis):
+        return text
+    return f"{text.rstrip()} {' '.join(emojis)}"
+
+
+def _choose_message_emojis(text: str, limit: int) -> list[str]:
+    normalized = text.casefold()
+    scored: list[tuple[int, int, tuple[str, ...]]] = []
+
+    for index, (markers, emojis) in enumerate(EMOJI_THEMES):
+        score = sum(1 for marker in markers if marker in normalized)
+        if score:
+            scored.append((score, -index, emojis))
+
+    scored.sort(reverse=True)
+
+    selected: list[str] = []
+    for _, _, emojis in scored:
+        for emoji in emojis:
+            if emoji not in selected:
+                selected.append(emoji)
+            if len(selected) >= limit:
+                return selected
+    return selected
 
 
 def format_replacements(replacements: dict[str, str]) -> str:
